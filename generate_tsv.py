@@ -93,7 +93,7 @@ def parse_args():
                         help='directory to load object classes for classification',
                         default="data/genome/1600-400-20")
     
-    
+    parser.add_argument('--root_folder', dest='root_folder')
     parser.add_argument('--out_file_feature', dest='out_file_feature',
                         help='output file feature path')
     parser.add_argument('--out_file_label', dest='out_file_label',
@@ -537,4 +537,8 @@ if __name__ == '__main__':
     # image_ids = load_image_ids(args.data_split)
     image_ids = get_images_ids(args.file_key, args.start_index, args.end_index)
 
-    generate_tsv(args.out_file_feature, args.out_file_label, args.out_file_error, image_ids, args)
+    import os
+    file_feature = os.path.join(args.root_folder, args.out_file_feature)
+    file_label = os.path.join(args.root_folder, args.out_file_label)
+    file_error = os.path.join(args.root_folder, args.out_file_error)
+    generate_tsv(file_feature, file_label, file_error, image_ids, args)
