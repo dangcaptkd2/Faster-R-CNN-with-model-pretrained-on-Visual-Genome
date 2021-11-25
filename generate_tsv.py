@@ -12,7 +12,7 @@
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
+import pickle
 import _init_paths
 import os
 import sys
@@ -55,14 +55,16 @@ except NameError:
 csv.field_size_limit(sys.maxsize)
 
 
-FIELDNAMES = ['image_id', 'image_w','image_h','num_boxes', 'boxes', 'features']
+FIELDNAMES = ['image_id', 'feature']
+
+Label_names = ['image_id','label']
 
 # Settings for the number of features per image. To re-create pretrained features with 36 features
 # per image, set both values to 36.
-MIN_BOXES = 36
-MAX_BOXES = 36
-# MIN_BOXES = 10
-# MAX_BOXES = 100
+# MIN_BOXES = 1
+# MAX_BOXES = 20
+MIN_BOXES = 46
+MAX_BOXES = 46
 
 def parse_args():
     """
@@ -90,9 +92,20 @@ def parse_args():
     parser.add_argument('--classes_dir', dest='classes_dir',
                         help='directory to load object classes for classification',
                         default="data/genome/1600-400-20")
-    parser.add_argument('--out', dest='outfile',
-                        help='output filepath',
-                        default=None, type=str)
+    
+    
+    parser.add_argument('--out_file_feature', dest='out_file_feature',
+                        help='output file feature path')
+    parser.add_argument('--out_file_label', dest='out_file_label',
+                        help='output file label path')
+    parser.add_argument('--out_file_error', dest='out_file_error',
+                        help='output file error path')
+    parser.add_argument('--start_index', dest='start_index', type=int)
+    parser.add_argument('--end_index', dest='end_index', type=int)
+    parser.add_argument('--file_key', dest='file_key', type=str)
+
+
+                       
     parser.add_argument('--cfg', dest='cfg_file',
                         help='optional config file',
                         default='cfgs/res101.yml', type=str)
@@ -222,6 +235,7 @@ def get_detections_from_im(fasterRCNN, classes, im_file, image_id, args, conf_th
       im_in = im_in[:,:,np.newaxis]
       im_in = np.concatenate((im_in,im_in,im_in), axis=2)
     # rgb -> bgr
+    im_in = im_in[:,:,:3]
     im = im_in[:,:,::-1]
 
     vis = True
@@ -335,15 +349,67 @@ def get_detections_from_im(fasterRCNN, classes, im_file, image_id, args, conf_th
         kind = objects[i]+1
         bbox = boxes[i, kind * 4: (kind + 1) * 4]
         box_dets[i] = np.array(bbox.cpu())
+  
+    image_width = np.size(im_in,1)
+    image_height = np.size(im_in,0)
+    feature = (pooled_feat[keep_boxes].cpu()).detach().numpy()
+    box_width = boxes[:, 2] - boxes[:, 0]
+    box_height = boxes[:, 3] - boxes[:, 1]
+    scaled_width = box_width / image_width
+    scaled_height = box_height / image_height
+    scaled_x = boxes[:, 0] / image_width
+    scaled_y = boxes[:, 1] / image_height
+    scaled_width = scaled_width[..., np.newaxis]
+    scaled_height = scaled_height[..., np.newaxis]
+    scaled_x = scaled_x[..., np.newaxis]
+    scaled_y = scaled_y[..., np.newaxis]
+    scaled_x = scaled_x.cpu()
+    scaled_y = scaled_y.cpu()
+    scaled_width = scaled_width.cpu()
+    scaled_height= scaled_height.cpu()
+    spatial_features = np.concatenate(
+         (scaled_x,
+          scaled_y,
+          scaled_x + scaled_width,
+          scaled_y + scaled_height,
+          scaled_width,
+          scaled_height),
+          axis=1)
+    full_features = np.concatenate((feature, spatial_features), axis=1)
+    fea_base64 = base64.b64encode(full_features).decode('utf-8')
+    fea_info = {'features': fea_base64, 'num_boxes': boxes.shape[0]}
+    
 
-    return {
+   
+    file_label = open('/content/Faster-R-CNN-with-model-pretrained-on-Visual-Genome/data/genome/1600-400-20/objects_vocab.txt')  
+    f = file_label.read()
+    arr_label = f.split('\n')  
+    conf_arr , _ = torch.max(scores[keep_boxes],axis=1)
+    conf_arr = conf_arr.tolist()
+    label_arr = [objects[i].tolist() for i in range(len(objects))]
+    final_label = [] 
+    for idx in label_arr :
+      final_label.append(arr_label[idx])
+    #print(box_dets)
+    res = []
+    import json 
+    #dictionary = json.load(open('/content/dictionary_1600_obj.json'))
+    for idx in range(len(final_label)):
+      dict_label = {}
+      dict_label['class'] = final_label[idx]
+      dict_label['conf'] = conf_arr[idx]
+      dict_label['rect'] = box_dets[idx].tolist()
+      res.append(dict_label)
+  
+    return ({
         'image_id': image_id,
-        'image_h': np.size(im, 0),
-        'image_w': np.size(im, 1),
-        'num_boxes': len(keep_boxes),
-        'boxes': base64.b64encode(box_dets),
-        'features': base64.b64encode((pooled_feat[keep_boxes].cpu()).detach().numpy())
-    }
+        # 'feature': {'feature':base64.b64encode((pooled_feat[keep_boxes].cpu()).detach().numpy()),"num_boxes":46}
+        'feature': fea_info
+    },
+    {
+      'image_id':image_id,
+      'label': res 
+    } )
 
 def load_model(args):
     # set cfg according to the dataset used to train the pre-trained model
@@ -365,8 +431,8 @@ def load_model(args):
 
     cfg.USE_GPU_NMS = args.cuda
 
-    print('Using config:')
-    pprint.pprint(cfg)
+    # print('Using config:')
+    # pprint.pprint(cfg)
     np.random.seed(cfg.RNG_SEED)
 
     # Load classes
@@ -409,14 +475,15 @@ def load_model(args):
 
     return classes, fasterRCNN
 
-def generate_tsv(outfile, image_ids, args):
+def generate_tsv(out_file_feature, out_file_label, out_file_error, image_ids, args):
     # First check if file exists, and if it is complete
     # image_ids: [image_path, image_id]
     wanted_ids = set([int(image_id[1]) for image_id in image_ids])
     found_ids = set()
-    if os.path.exists(outfile):
-        with open(outfile) as tsvfile:
+    if os.path.exists(out_file_feature):
+        with open(out_file_feature) as tsvfile, open(out_file_label) as labelfile:
             reader = csv.DictReader(tsvfile, delimiter='\t', fieldnames = FIELDNAMES)
+            reader_ = csv.DictReader(labelfile, delimiter='\t')
             for item in reader:
                 found_ids.add(int(item['image_id']))
     missing = wanted_ids - found_ids
@@ -426,23 +493,41 @@ def generate_tsv(outfile, image_ids, args):
         print ('Missing {:d}/{:d}'.format(len(missing), len(image_ids)))
     if len(missing) > 0:
         classes, fasterRCNN = load_model(args)
-        with open(outfile, 'a+') as tsvfile:
+        with open(out_file_feature, 'a+') as tsvfile,open(out_file_label,'a+') as labelfile:
             writer = csv.DictWriter(tsvfile, delimiter = '\t', fieldnames = FIELDNAMES)
+            writerLabel = csv.DictWriter(labelfile, delimiter = '\t', fieldnames = Label_names)
             _t = {'misc' : Timer()}
             count = 0
+            error_file = []
+            import json
             for im_file,image_id in image_ids:
-                if int(image_id) in missing:
-                    _t['misc'].tic()
-                    # print (type(get_detections_from_im(fasterRCNN, classes, im_file, image_id, args)))
-                    # print (get_detections_from_im(fasterRCNN, classes, im_file, image_id, args))
-                    writer.writerow(get_detections_from_im(fasterRCNN, classes, im_file, image_id, args))
-                    _t['misc'].toc()
-                    if (count % 100) == 0:
-                        print ('{:d}/{:d} {:.3f}s (projected finish: {:.2f} hours)' \
-                              .format(count+1, len(missing), _t['misc'].average_time,
-                              _t['misc'].average_time*(len(missing)-count)/3600))
-                    count += 1
-
+                try:
+                    if int(image_id) in missing:
+                        _t['misc'].tic()
+                        # print (type(get_detections_from_im(fasterRCNN, classes, im_file, image_id, args)))
+                        feat , label = get_detections_from_im(fasterRCNN, classes, im_file, image_id, args)
+                        writer.writerow(feat)
+                        writerLabel.writerow(label)
+                        _t['misc'].toc()
+                        if (count % 100) == 0:
+                            print ('{:d}/{:d} {:.3f}s (projected finish: {:.2f} hours)' \
+                                .format(count+1, len(missing), _t['misc'].average_time,
+                                _t['misc'].average_time*(len(missing)-count)/3600))
+                        count += 1
+                except:
+                    count+=1
+                    error_file.append(image_id)
+                    print('ERROR:', im_file)
+            with open(out_file_error, 'w') as outfile:
+                json.dump(error_file, outfile)
+def get_images_ids(file_key, start_idx, end_idx):
+    import json
+    import os
+    key2file = json.load(open(file_key))
+    result = []
+    for id, filename in list(key2file.items())[start_idx:end_idx]:
+        result.append([filename, str(id)])
+    return result
 if __name__ == '__main__':
     args = parse_args()
 
@@ -450,6 +535,6 @@ if __name__ == '__main__':
     print(args)
 
     # image_ids = load_image_ids(args.data_split)
-    image_ids = [['images/img1.jpg', 0], ['images/img2.jpg', 1]]
+    image_ids = get_images_ids(args.file_key, args.start_index, args.end_index)
 
-    generate_tsv(args.outfile, image_ids, args)
+    generate_tsv(args.out_file_feature, args.out_file_label, args.out_file_error, image_ids, args)
