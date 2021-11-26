@@ -533,11 +533,12 @@ if __name__ == '__main__':
 
     print('Called with args:')
     print(args)
-
-    # image_ids = load_image_ids(args.data_split)
-    image_ids = get_images_ids(args.file_key, args.start_index, args.end_index)
-
     import os
+    
+    key2file_path = os.path.join(args.root_folder, args.file_key)
+    image_ids = get_images_ids(key2file_path, args.start_index, args.end_index)
+
+    
     file_feature = os.path.join(args.root_folder, args.out_file_feature)
     file_label = os.path.join(args.root_folder, args.out_file_label)
     file_error = os.path.join(args.root_folder, args.out_file_error)
